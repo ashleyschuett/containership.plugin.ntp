@@ -3,121 +3,132 @@
 const _ = require('lodash');
 const ContainershipPlugin = require('containership.plugin');
 
-const Docker = require("dockerode");
-const docker = new Docker({socketPath: "/var/run/docker.sock"});
+const Docker = require('dockerode');
+const docker = new Docker({socketPath: '/var/run/docker.sock'});
+
+const APPLICATION_NAME = 'ntpd';
 
 module.exports = new ContainershipPlugin({
     name: 'ntp',
     type: 'core',
 
-    initialize: function(core) {
-        const applicationName = 'ntpd';
-        core.logger.register(applicationName);
+    runFollower: function(core) {
+        core.loggers[APPLICATION_NAME].log('verbose', `${APPLICATION_NAME} does not run on follower nodes.`);
+    },
 
-        const addApplication = () => {
-            const key = [core.constants.myriad.APPLICATION_PREFIX, applicationName].join(core.constants.myriad.DELIMITER);
+    runLeader: function(core) {
+            const addApplication = () => {
+                const key = [core.constants.myriad.APPLICATION_PREFIX, APPLICATION_NAME].join(core.constants.myriad.DELIMITER);
 
-            core.cluster.myriad.persistence.get(key, (err) => {
-                if(err) {
-                    if(err.name === core.constants.myriad.ENOKEY) {
-                        core.applications.add({
-                            id: applicationName,
-                            image: 'containership/ntp:latest',
-                            cpus: 0.1,
-                            memory: 16,
-                            privileged: true,
-                            tags: {
-                                constraints: {
-                                    per_host: 1
+                core.cluster.myriad.persistence.get(key, (err) => {
+                    if(err) {
+                        if(err.name === core.constants.myriad.ENOKEY) {
+                            core.applications.add({
+                                id: APPLICATION_NAME,
+                                image: 'containership/ntp:latest',
+                                cpus: 0.1,
+                                memory: 16,
+                                privileged: true,
+                                tags: {
+                                    constraints: {
+                                        per_host: 1
+                                    },
+                                    metadata: {
+                                        plugin: APPLICATION_NAME,
+                                        ancestry: 'containership.plugin'
+                                    }
                                 },
-                                metadata: {
-                                    plugin: applicationName,
-                                    ancestry: 'containership.plugin'
+                            }, (err) => {
+                                if(!err) {
+                                    core.loggers[APPLICATION_NAME].log('verbose', `Created ${APPLICATION_NAME}!`);
+                                } else {
+                                    core.loggers[APPLICATION_NAME].log('error', `Couldnt create ${APPLICATION_NAME}: ${err}`);
                                 }
-                            },
-                        }, (err) => {
-                            if(!err) {
-                                core.loggers[applicationName].log('verbose', `Created ${applicationName}!`);
-                            } else {
-                                core.loggers[applicationName].log('error', `Couldnt create ${applicationName}: ${err}`);
-                            }
-                        });
+                            });
+                        } else {
+                            core.loggers[APPLICATION_NAME].log('verbose', `${APPLICATION_NAME} already exists, skipping create!`);
+                        }
                     } else {
-                        core.loggers[applicationName].log('verbose', `${applicationName} already exists, skipping create!`);
-                    }
-                } else {
-                        core.loggers[applicationName].log('error', `Unexpected error accessing myriad when loading ${applicationName}: ${err}`);
-                }
-            });
-        };
-
-        const addNtpToLeaderNode = (nodeId) => {
-            docker.listContainers((err, containers) => {
-                if (err) {
-                    return core.loggers[applicationName].log('error', `Failed to list existing containers on leader node[${nodeId}]\n${err.message}`);
-                }
-
-                let isNtpRunning = false;
-
-                _.forEach(containers, (container) => {
-                    if (container.Names[0].slice(1) === 'containership-ntp') {
-                        isNtpRunning = true;
-                        return false; // break out of forEach
+                            core.loggers[APPLICATION_NAME].log('error', `Unexpected error accessing myriad when loading ${APPLICATION_NAME}: ${err}`);
                     }
                 });
+            };
 
-                if (isNtpRunning) {
-                    return;
-                }
-
-                docker.pull('containership/ntp:latest', (err, stream) => {
+            const addNtpToLeaderNode = (nodeId) => {
+                docker.listContainers((err, containers) => {
                     if (err) {
-                        return core.loggers[applicationName].log('error', `Failed to pull containership/ntp on leader node[${nodeId}]\n${err.message}`);
+                        return core.loggers[APPLICATION_NAME].log('error', `Failed to list existing containers on leader node[${nodeId}]\n${err.message}`);
                     }
 
-                    docker.modem.followProgress(stream, onFinished);
-                    function onFinished(err, output) {
+                    let isNtpRunning = false;
+
+                    _.forEach(containers, (container) => {
+                        if (container.Names[0].slice(1) === 'containership-ntp') {
+                            isNtpRunning = true;
+                            return false; // break out of forEach
+                        }
+                    });
+
+                    if (isNtpRunning) {
+                        return;
+                    }
+
+                    docker.pull('containership/ntp:latest', (err, stream) => {
                         if (err) {
-                            return core.loggers[applicationName].log('error', `Failed to pull containership/ntp on leader node[${nodeId}]\n${err.message}`);
+                            return core.loggers[APPLICATION_NAME].log('error', `Failed to pull containership/ntp on leader node[${nodeId}]\n${err.message}`);
                         }
 
-                        core.loggers[applicationName].log('verbose', `Starting containership/ntp on leader node[${nodeId}]`);
-                        docker.run('containership/ntp:latest', [], process.stdout, {
-                            name: 'containership-ntp',
-                            Binds: ["/var/run/docker.sock:/var/run/docker.sock"],
-                            HostConfig: {
-                                Privileged: true,
-                                RestartPolicy: {
-                                    Name: "on-failure",
-                                    MaximumRetryCount: 5
-                                },
-                                CpuShares: Math.floor(0.1 * 1024),
-                                Memory: 16 * 1024 * 1024 // 16MB,
+                        docker.modem.followProgress(stream, onFinished);
+                        function onFinished(err, output) {
+                            if (err) {
+                                return core.loggers[APPLICATION_NAME].log('error', `Failed to pull containership/ntp on leader node[${nodeId}]\n${err.message}`);
                             }
-                        }, (err, data, container) => {
-                            if(err) {
-                                return core.loggers[applicationName].log('error', `Failed to run containership/ntp on leader node[${nodeId}]\n${err.message}`);
-                            }
-                        });
-                    }
-                });
-            });
-        };
 
-        // launch NTP on leader nodes
-        if(core.options.mode == 'leader') {
+                            core.loggers[APPLICATION_NAME].log('verbose', `Starting containership/ntp on leader node[${nodeId}]`);
+                            docker.run('containership/ntp:latest', [], process.stdout, {
+                                name: 'containership-ntp',
+                                Binds: ["/var/run/docker.sock:/var/run/docker.sock"],
+                                HostConfig: {
+                                    Privileged: true,
+                                    RestartPolicy: {
+                                        Name: "on-failure",
+                                        MaximumRetryCount: 5
+                                    },
+                                    CpuShares: Math.floor(0.1 * 1024),
+                                    Memory: 16 * 1024 * 1024 // 16MB,
+                                }
+                            }, (err, data, container) => {
+                                if(err) {
+                                    return core.loggers[APPLICATION_NAME].log('error', `Failed to run containership/ntp on leader node[${nodeId}]\n${err.message}`);
+                                }
+                            });
+                        }
+                    });
+                });
+            };
+
+            // launch NTP on leader nodes
             const attributes = core.cluster.legiond.get_attributes();
             const nodeId = attributes.id;
             addNtpToLeaderNode(nodeId);
+
+            if(core.cluster.praetor.is_controlling_leader()) {
+                addApplication();
+            }
+
+            core.cluster.legiond.on('myriad.bootstrapped', () => {
+                addApplication();
+            });
+    },
+
+    initialize: function(core) {
+        core.logger.register(APPLICATION_NAME);
+
+        if(core.options.mode === 'leader'){
+            return module.exports.runLeader(core);
         }
 
-        if(core.cluster.praetor.is_controlling_leader()) {
-            addApplication();
-        }
-
-        core.cluster.legiond.on('myriad.bootstrapped', () => {
-            addApplication();
-        });
+        return module.exports.runFollower(core);
     },
 
     reload: function() {}
